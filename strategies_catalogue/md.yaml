@@ -1,0 +1,64 @@
+# strategies_catalogue/md.yaml
+# MD — Multi-Dex Directional Trading
+# ---------------------------------------------------------------------------
+# Read by control plane (post-graduation build). Don't edit fields without
+# checking _SCHEMA.yaml. Keep prose plain-English — this is what the user
+# sees on Telegram /md help and the dashboard tooltip.
+
+id: md
+display_name: "MD — Multi-Dex Directional"
+status: live
+default_state: paper
+
+description: |
+  Directional perpetual-futures trades on a single venue at a time. Goes
+  long OR short based on technical signals from the strategy engine. Each
+  position has a stop-loss and take-profit set at entry. Not hedged — full
+  delta to the underlying price.
+
+what_it_trades:
+  - "Long OR short positions on perpetual futures (one leg only)"
+  - "Currently active strategies: trend_momentum (more to come)"
+  - "Stop-loss + take-profit managed by position_manager"
+  - "Position size set by risk engine (typically $10-50 per trade)"
+
+supported_venues: [hyperliquid, grvt, pacifica]
+
+risks:
+  - "Directional exposure — full P&L impact from underlying price moves"
+  - "Stop-loss caps loss per trade (typically 2% of position notional)"
+  - "Multiple concurrent positions on correlated assets compound directional bias"
+  - "Slippage on entry / exit can degrade win rate, especially on low-liquidity assets"
+  - "Funding paid (or received) on each held position depending on side + venue"
+
+when_off_means: |
+  PAUSE: blocks new MD entries. Existing MD positions are HELD with their
+  SL/TP intact and continue to be managed by position_manager. The position
+  monitor will still close on stop-loss / take-profit / time-stop hits.
+  Resume: re-enable from /md on (60-min grace window before auto-open
+  resumes). Held positions resume normal management.
+
+when_on_means: |
+  LIVE: strategy engine generates signals on every market-data tick, risk
+  engine filters them by edge/confidence/asset-class thresholds, portfolio
+  manager enforces diversification, accepted signals flow to execution.
+  Positions opened automatically (subject to portfolio caps).
+
+enable_preconditions:
+  - "Free margin >= $20 across enabled venues"
+  - "MD agent service running (com.baba.trading-agent)"
+  - "Portfolio Manager dry_run = false"
+  - "Risk engine config loaded successfully"
+
+adjacent_workers:
+  - com.baba.trading-agent
+
+audit_log_category: md
+ui_color: "#3a7bd5"
+
+max_concurrent: 12
+
+notes: |
+  P3.1 (PortfolioManager) wired into orchestrator on 2026-05-12 — gate
+  controls per-asset-class diversification BEFORE this control-plane gate.
+  Both must pass for a signal to execute.

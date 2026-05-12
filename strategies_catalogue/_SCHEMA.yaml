@@ -1,0 +1,44 @@
+# strategies_catalogue/_SCHEMA.yaml
+# ---------------------------------------------------------------------------
+# Schema for every strategy YAML in this directory.
+# The control plane (when built post-graduation) reads ALL *.yaml files here
+# at startup and on config-reload signal. Files prefixed with _ (this one)
+# are documentation, not strategies.
+# ---------------------------------------------------------------------------
+#
+# Required fields:
+#
+#   id (str)               Lowercase snake_case, ≤32 chars. MUST match filename.
+#   display_name (str)     Human-readable name for UI.
+#   status (enum)          live | beta | experimental | deprecated
+#   default_state (enum)   paper | off | live  (state for new users / first deploy)
+#   description (str)      Plain-English: what this strategy does, in 1-2 paragraphs.
+#                          Shown in /strategy help and dashboard tooltip.
+#   what_it_trades (list)  Bullet points: what positions does this open?
+#   supported_venues (list) Venue IDs this strategy can run on.
+#   risks (list)           Bullet points of risks user should understand
+#                          BEFORE enabling. Not legalese — practical.
+#   when_off_means (str)   Plain English: what happens when user flips OFF.
+#                          MUST cover: existing positions, auto-close, fees.
+#   when_on_means (str)    Plain English: what happens when user flips ON.
+#                          MUST cover: grace window, retroactive entries.
+#   enable_preconditions (list) Conditions that MUST be true before flip-to-LIVE
+#                          is permitted (e.g. "free margin >= $20").
+#   adjacent_workers (list) launchd service names this strategy depends on.
+#                          Dashboard health row pulls from here.
+#   audit_log_category (str) Category tag for unified audit log.
+#   ui_color (hex)         Color for dashboard widget (#rrggbb).
+#
+# Optional fields:
+#
+#   when_drain_means (str) If "drain" semantics differ from "off". Defaults to
+#                          "blocks new entries; closes existing on next normal
+#                          opportunity (time-stop, spread compression)".
+#   max_concurrent (int)   Soft cap on concurrent positions. Used by dashboard
+#                          warning and (later) by capital governor.
+#   sources_doc (str)      Path to strategy-internal design doc, if exists.
+#   notes (str)            Free-form. Future-Yomi will thank present-Yomi.
+#
+# ---------------------------------------------------------------------------
+# Filename = "<id>.yaml". Don't include the .yaml extension in the id field.
+# ---------------------------------------------------------------------------

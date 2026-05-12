@@ -1,0 +1,30 @@
+# Local artifacts that should never be public
+*.env
+*.env.*
+.env
+.env.*
+secrets/
+private/
+*.key
+*.pem
+
+# Build / OS noise
+.DS_Store
+.idea/
+.vscode/
+__pycache__/
+*.pyc
+node_modules/
+dist/
+build/
+
+# Foundry / Hardhat artifacts (in case the contract gets compiled locally)
+contracts/out/
+contracts/cache/
+contracts/artifacts/
+contracts/typechain/
+contracts/.deps/
+
+# Local logs
+*.log
+logs/

@@ -1,0 +1,69 @@
+# strategies_catalogue/oracle.yaml
+# ORACLE — Prediction-Market Trading (v1 codename: ATLAS, Polymarket)
+# ---------------------------------------------------------------------------
+
+id: oracle
+display_name: "ORACLE — Prediction Markets"
+status: beta
+default_state: paper
+
+description: |
+  Directional trading on prediction-market outcomes. Today's
+  implementation (v1 codename ATLAS) trades binary YES/NO markets on
+  Polymarket using a strategy engine that scores each market on
+  expiration timing, liquidity depth, momentum, and recent observer
+  policy outcomes. Different mechanics from perpetuals: markets resolve
+  to 0 or 1, no funding, no leverage; positions are token holdings.
+
+what_it_trades:
+  - "YES / NO outcome tokens on Polymarket binary markets"
+  - "Position sizes set by signal confidence + capital cap"
+  - "SL via re-evaluating the market and selling tokens (no exchange-side stops)"
+  - "Future expansion: cross-platform arb (Kalshi, Manifold)"
+
+supported_venues: [polymarket]
+
+risks:
+  - "Binary settlement risk — a NO position pays $0 if YES resolves"
+  - "Liquidity risk — exit slippage on shallow markets can erase edge"
+  - "Resolution risk — disputes / oracle delays can lock capital"
+  - "SL via observer-policy re-eval is slower than exchange-side stops
+    (cadence ~10 min vs perp's < 1s)"
+  - "Capital lock-up — positions held until market resolves OR sold (positions
+    in deep red can be hard to exit)"
+
+when_off_means: |
+  PAUSE: blocks new ORACLE entries. Existing positions are HELD; observer
+  policies still evaluate them but do not close on observer signals
+  (only on hard SL or resolution). Use FLATTEN command to dump all
+  ORACLE positions immediately at market.
+
+when_on_means: |
+  LIVE: ATLAS strategy engine evaluates new markets, scores them via
+  observer policies, opens positions via semi_auto_decisions or auto
+  (depending on policy enable state). Existing positions resume full
+  management. 60-min grace window blocks auto-opens after re-enable.
+
+enable_preconditions:
+  - "ATLAS service running (com.babaanalytics.atlas)"
+  - "Observer service running (com.babaanalytics.atlas.observer)"
+  - "Free pUSD >= $20 on Polymarket"
+  - "ATLAS go-live tracker shows all milestones M1-M6 GREEN
+    (atlas_golive_status.json)"
+
+adjacent_workers:
+  - com.babaanalytics.atlas
+  - com.babaanalytics.atlas.observer
+  - com.baba.atlas-golive-tracker
+  - com.baba.atlas.daily-proof
+
+audit_log_category: oracle
+ui_color: "#9b59b6"
+
+max_concurrent: 8
+
+notes: |
+  Status "beta" because ATLAS is in go-live runway (gate G1-G6 tracker).
+  Bumps to "live" after Yomi flips it to live trading post-tracker green.
+  Until then, default_state stays "paper". Don't enable LIVE without
+  reading the ATLAS go-live tracker output for the day.

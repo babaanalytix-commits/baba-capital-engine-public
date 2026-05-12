@@ -1,0 +1,72 @@
+# strategies_catalogue/carry.yaml
+# CARRY — Funding-Rate Arbitrage (delta-neutral)
+# ---------------------------------------------------------------------------
+
+id: carry
+display_name: "CARRY — Funding-Rate Arbitrage"
+status: live
+default_state: paper
+
+description: |
+  Delta-neutral funding-rate arbitrage. Opens a matched pair of positions
+  (long on the venue paying high funding, short on the venue paying low
+  funding) of equal $ size. Earns the spread between the two funding
+  rates while remaining market-neutral. Capital tied up = roughly 2x the
+  per-leg notional (margin on both sides).
+
+what_it_trades:
+  - "Pairs of perpetual-futures positions (one long + one short, same asset)"
+  - "Across two different venues — typically HL ↔ Pacifica or HL ↔ GRVT"
+  - "Position closed when funding spread compresses, sign-flips, or hits time-stop"
+
+supported_venues: [hyperliquid, grvt, pacifica]
+
+risks:
+  - "Margin breach risk: if one venue's margin breaches before the other's,
+    one leg can be liquidated leaving the other naked (auto-flatten on 85%
+    margin tier mitigates but doesn't eliminate)"
+  - "Funding rates can compress / flip during the hold — spread that was
+    +50% APR at open can be +5% APR a day later"
+  - "Slippage on entry/exit — atomic open/close (open_pair.py / close_pair.py)
+    rolls back partial fills but adds latency"
+  - "Per-venue down time: if one adapter goes silent, audit may not flag the
+    naked-leg risk fast enough (mitigated by audit_vs_live every 30 min)"
+  - "Pacifica has no public funding-payment-history endpoint — reconciliation
+    can only verify HL + GRVT against ground truth, not Pacifica"
+
+when_off_means: |
+  PAUSE: blocks new CARRY pair opens. Existing pairs are HELD —
+  auto_close_worker continues to monitor for risk events (spread
+  compression, sign-flip, leg divergence, margin breach) and closes when
+  triggered. The smart time-stop also still fires for stale pairs. Use
+  FLATTEN command if you want to immediately close all CARRY pairs.
+
+when_on_means: |
+  LIVE: opportunity_scanner ranks pairs hourly, alerter sends one-tap
+  Telegram offers (or, post-graduation, auto-opens within budget). Existing
+  pairs continue normal management. 60-min grace window blocks auto-opens
+  after a re-enable.
+
+enable_preconditions:
+  - "Free margin >= $20 on each venue you intend to use"
+  - "auto_close_worker service running (com.baba.auto-close)"
+  - "fundamentals.db.funding_rates fresh (< 30 min old)"
+  - "GRVT funding rate verified (BABA_TRUST_GRVT_FUNDING=true) IF using GRVT"
+
+adjacent_workers:
+  - com.baba.auto-close
+  - com.baba.fundamentals.funding
+  - com.baba.fundamentals.arbalert
+  - com.baba.funding-arb-rescan
+  - com.baba.reconciliation
+
+audit_log_category: carry
+ui_color: "#27ae60"
+
+max_concurrent: 12
+
+notes: |
+  CARRY is the workhorse strategy — most predictable yield, lowest
+  directional risk. The reconciliation worker (#179) compares predicted
+  funding accrual vs venue payment history every 4h and flags pairs with
+  > 15% divergence. Phase D auto-open graduation gates on this strategy.
