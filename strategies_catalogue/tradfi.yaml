@@ -1,0 +1,86 @@
+# strategies_catalogue/tradfi.yaml
+# TradFi — Traditional-finance perps on Hyperliquid / GRVT
+# ---------------------------------------------------------------------------
+# Subset of the MD pillar. Listed separately because TradFi instruments
+# (equities, ETFs, commodities, FX) require different risk treatment than
+# crypto perps — lower leverage, tighter SL, calendar-aware scheduling.
+
+id: tradfi
+display_name: "TradFi — Equities / ETFs / Commodities / FX"
+status: live
+default_state: paper
+
+description: |
+  Directional perpetual-futures trades on traditional-finance underlyings
+  via Hyperliquid and GRVT TradFi venues. Two complementary catalyst
+  strategies: pre-earnings drift (tradfi_earnings_catalyst_v1) and
+  insider Form 4 cluster strength (tradfi_political_catalyst_v1).
+
+what_it_trades:
+  - "U.S. mega-cap equity perps (TSLA, NVDA, AAPL, MSFT, GOOGL, AMZN, META)"
+  - "Crypto-adjacent equity perps (COIN, MSTR, HOOD)"
+  - "Index ETF perps (SPY, QQQ, SPX)"
+  - "Commodity perps (CL, BZ)"
+  - "FX perps (EURUSD)"
+
+supported_venues: [grvt, hyperliquid]
+
+active_strategies:
+  - id: tradfi_earnings_catalyst_v1
+    description: "Pre-earnings directional drift, 30min-4h before release."
+    direction: "default long (v1.1 will add AI verdict)"
+    size_usd: 15
+    sl_pct: 5
+    tp_pct: 8
+    exit: "4h time-stop post-print"
+    tap_to_approve: true
+
+  - id: tradfi_political_catalyst_v1
+    description: |
+      Top-N TradFi equities ranked by SEC EDGAR Form 4 insider filing
+      cluster score over the last 30 days. Strong insider clusters
+      historically precede positive forward returns; sales are noise
+      from 10b5-1 plans and option exercises, so excluded from the
+      bullish score. SEC EDGAR is free and authenticationless.
+    direction: "default long on cluster signal"
+    size_usd: 15
+    sl_pct: 5
+    tp_pct: 8
+    exit: "14d time-stop"
+    tap_to_approve: true
+    data_source: "SEC EDGAR Form 4 (free, no API key)"
+    augments:
+      - "FMP senate trades — gated on FMP_API_KEY (optional)"
+
+risks:
+  - "Equity moves are smaller than crypto but gap risk is real (overnight, halts)"
+  - "Earnings prints can produce 8-15% intraday gaps that blow tight SLs"
+  - "Insider clusters can be coincident with private bad-news (option exercises right before negative announcements) — sell-side ignored deliberately"
+  - "GRVT TradFi liquidity thin outside US market hours"
+
+when_off_means: |
+  PAUSE: blocks new TradFi entries. Existing TradFi positions are HELD
+  with SL/TP intact. The position monitor closes on SL/TP/time-stop hits.
+
+when_on_means: |
+  LIVE: tradfi-political-scan runs daily 17:00 UTC and tradfi-earnings-
+  catalyst-v1 runs on the MD scanner cadence. Approved tap-to-approve
+  signals execute on GRVT (primary) with HL fallback.
+
+enable_preconditions:
+  - "GRVT credentials in .env (GRVT_API_KEY + GRVT_PRIVATE_KEY)"
+  - "TradFi sub-bucket cap configured in PortfolioManager"
+  - "Earnings calendar cache fresh (<24h) for earnings_catalyst_v1"
+
+adjacent_workers:
+  - com.baba.engine-tradfi-political-scan
+  - com.baba.engine-md-scanner
+
+audit_log_category: md_tradfi
+ui_color: "#9c27b0"
+max_concurrent: 3
+
+notes: |
+  2026-05-24: Added tradfi_political_catalyst_v1 — SEC EDGAR-sourced
+  insider-cluster strategy. Smoke test 2026-05-24: META ranked #1 with
+  24 Form 4 filings in 30 days (cluster=1.0); GOOGL #2; AMZN #3.

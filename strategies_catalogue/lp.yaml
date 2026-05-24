@@ -1,0 +1,91 @@
+# strategies_catalogue/lp.yaml
+# LP — Concentrated-liquidity Provisioning
+# ---------------------------------------------------------------------------
+# Provides liquidity to DEX concentrated-liquidity pools (Uniswap V3 /
+# Aerodrome Slipstream / HyperSwap V3). Earns trading fees + emissions
+# when staked in gauges.
+
+id: lp
+display_name: "LP — Concentrated Liquidity Provisioning"
+status: phase_1_live
+default_state: tap_to_approve
+
+description: |
+  Mints concentrated-liquidity positions in CL AMM pools, optionally
+  stakes the position NFT in the pool's gauge to earn protocol
+  emissions on top of trading fees. Two yield sources: (1) passive
+  trading fees from in-range price action, (2) emissions only when
+  the NFT is staked.
+
+what_it_trades:
+  - "Aerodrome Slipstream cbBTC/USDC on Base (Phase 1 target pool)"
+  - "Future: HyperSwap V3 on HyperEVM, Uniswap V3 on Ethereum"
+
+supported_venues: [aerodrome_base, hyperswap_hyperevm, uniswap_eth]
+
+active_strategies:
+  - id: lp_agile_subscriber_v1
+    description: |
+      Picks the highest-APR available CL pool from the universe,
+      mints a position with a ±X% range around current price,
+      stakes in the gauge if available, monitors for out-of-range
+      drift, rebalances when fees > rebalance cost.
+    bankroll_cap_usd: 30  # Phase 1 starter
+    per_position_cap_usd: 30
+    rebalance_trigger: "5% drift from range center OR APY drop > 30%"
+    tap_to_approve: true
+
+trustless_audit:
+  description: |
+    Every 30 minutes, com.baba.lp-onchain-audit reads the LP wallet's
+    full on-chain state directly from Blockscout (Base + Ethereum +
+    Optimism + Arbitrum) — bypassing any internal registry. Catches
+    drift between what the engine thinks it holds and what's actually
+    on-chain. Alerts on idle capital, low gas, or unexpected LP NFT
+    count changes.
+  source: "Blockscout REST v2 (free, no auth)"
+  cadence: "30 minutes"
+  chains_covered: [base, ethereum, optimism, arbitrum]
+  not_yet_covered: [hyperevm]
+  alerts:
+    - "🟡 yellow: low gas (< $0.50) on a chain holding USDC"
+    - "🟡 yellow: ≥ $5 USDC sitting idle with no LP NFT"
+    - "🔴 red: LP NFT count change vs prior snapshot"
+
+risks:
+  - "Impermanent loss when price moves out of range"
+  - "Smart-contract risk on the AMM and gauge contracts"
+  - "Emissions only flow if the position NFT is STAKED — passive holding earns fees only"
+  - "Gauge unstaking is instant for Slipstream LPs (no veAERO lockup involved at the position level)"
+  - "Cross-chain bridging cost can exceed the yield on small positions"
+
+when_off_means: |
+  PAUSE: blocks new LP mints. Existing positions continue to earn fees
+  (in-range) and emissions (if staked). The audit cron continues to
+  report. To exit a position manually, use the legacy LP tools — auto-
+  close on-pause is not in v1.
+
+when_on_means: |
+  LIVE: lp_agile_subscriber_v1 picks pools from the universe, asks for
+  one-tap approval on every mint (Phase 1), executes on approve. Audit
+  continues every 30 minutes regardless of strategy state.
+
+enable_preconditions:
+  - "LP wallet funded with ≥ $30 USDC on Base"
+  - "≥ $1 of native gas on Base"
+  - "LP_WALLET_PRIVATE_KEY in .env.lp (chmod 600)"
+  - "LP_AUTO_EXECUTE=false for first 3 trades (Phase 1 safety gate)"
+
+adjacent_workers:
+  - com.baba.lp-onchain-audit
+  - com.baba.lp-pool-scanner
+  - com.baba.lp-lifecycle
+
+audit_log_category: lp
+ui_color: "#00bcd4"
+max_concurrent: 3
+
+notes: |
+  2026-05-24: On-chain audit integration via Blockscout shipped — first
+  trustless cross-check for LP positions. Phase 2 (per-NFT stake status
+  + fee accrual tracking) is queued. HyperEVM coverage outstanding.
