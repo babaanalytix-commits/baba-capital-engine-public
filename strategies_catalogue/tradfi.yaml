@@ -82,5 +82,15 @@ max_concurrent: 3
 
 notes: |
   2026-05-24: Added tradfi_political_catalyst_v1 — SEC EDGAR-sourced
-  insider-cluster strategy. Smoke test 2026-05-24: META ranked #1 with
-  24 Form 4 filings in 30 days (cluster=1.0); GOOGL #2; AMZN #3.
+  insider-cluster strategy.
+
+  v1.0 used naive filing-count cluster_score. Pre-deployment verification
+  caught that mega-cap Form 4 filings are dominated by RSU vesting (code M)
+  + tax withholding (code F), NOT open-market purchases (code P). META
+  showed 24 filings → 0 open-market buys → 32 open-market sells (net
+  -$14.7M). v1.0 would have fired LONG on bearish data.
+
+  v1.1 (same day) added a Form 4 XML deep-parser that filters to code P
+  only. Result: ZERO signals currently. No TradFi mega-cap has any
+  open-market BUYING in the last 30 days as of 2026-05-24 — interpreted
+  as smart-money risk-off positioning.
