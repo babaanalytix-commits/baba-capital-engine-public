@@ -62,8 +62,39 @@ ui_color: "#9b59b6"
 
 max_concurrent: 8
 
+active_strategies:
+  - id: pce_v2
+    description: "PCE-anchored shadow-model fade — emits when Polymarket-implied probability diverges from our PCE model on next print."
+    direction: "long YES or long NO depending on shadow vs market"
+    size_usd: 50
+    tap_to_approve: true
+
+  - id: commitment_anchor_fade_v1
+    description: "Long-horizon fade of markets anchored to unlikely commitments (e.g. specific delistings, partnership announcements)."
+    direction: "long NO on overpriced YES commitments"
+    size_usd: "10–25"
+    tap_to_approve: true
+
+  - id: oracle_macro_consensus_fade_v1
+    description: |
+      Asymmetric small-bet fades on heavily-concentrated US macro markets.
+      When consensus market prices ≥93% and tails ≤7% (e.g. June FOMC
+      "no change" at 97.6%), the cheap tail is structurally underpriced.
+      $5 bet on a tail at $0.005 pays $1,000 if hit (200× payoff).
+      Shipped 2026-05-24. See docs/oracle_consensus_fade.md.
+    direction: "long YES on cheap-tail (≤ 7%) markets"
+    size_usd: 5
+    sl: "probability drift past 0.20"
+    tp: "market resolves YES, OR time-stop at resolution − 1h"
+    tap_to_approve: true
+    data_source: "Polymarket gamma API + hand-curated US macro calendar (both public, free)"
+
 notes: |
   Status "beta" because ATLAS is in go-live runway (gate G1-G6 tracker).
   Bumps to "live" after Yomi flips it to live trading post-tracker green.
   Until then, default_state stays "paper". Don't enable LIVE without
   reading the ATLAS go-live tracker output for the day.
+
+  2026-05-24: Added oracle_macro_consensus_fade_v1 — first asymmetric
+  consensus-fade strategy. Live signal at v0.5 ship: $5 on "Fed +50bps
+  June 2026" at YES $0.0025 (0.25% implied) → ~2,000× payoff if hit.
