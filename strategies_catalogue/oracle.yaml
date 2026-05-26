@@ -89,6 +89,36 @@ active_strategies:
     tap_to_approve: true
     data_source: "Polymarket gamma API + hand-curated US macro calendar (both public, free)"
 
+  - id: oracle_ai_v1
+    description: |
+      Two-layer AI judge over Polymarket. Gemini 2.5 Flash triages 100s of
+      markets per scan (volume layer, ~$0.0025/batch), Claude Sonnet
+      deep-judges the top candidates (precision layer, ~$0.005/judgment).
+      Judge applies a POST-EVENT GUARD prompt forcing it to answer
+      WHEN the resolving event occurs + whether it's already past, so
+      markets in oracle-settlement drift (e.g. "SPX opens up or down" at
+      99.95¢ four hours after the open) get BLOCKED not chased.
+      Shipped 2026-05-26. See docs/oracle_ai_v1.md.
+    direction: "PASS verdicts on either YES or NO depending on judge"
+    size_usd: "1–5 (confidence × MAX_SIZE)"
+    sl: "no exchange-side stops (Polymarket); time-stop at resolution"
+    tp: "market resolves in our favour OR judge re-evaluates BLOCKED"
+    tap_to_approve: true
+    delivery: "Telegram (bmi-premium channel) + web dashboard (babacapital.app/app)"
+    data_source: "Polymarket gamma API + Gemini Flash + Claude Sonnet"
+    safety_layers:
+      - "Extreme-price hard skip (yes_price >= 0.97 or <= 0.03 → skip in markets.py)"
+      - "Daily cost cap ($0.50/day, $5 total Anthropic budget)"
+      - "Rapid-loss auto-pause (24h cumulative loss > $10 → auto-shadow)"
+      - "Single-trade blowup detection (>50% loss in <4h → auto-shadow)"
+      - "Burn-without-resolution (>$2 spent in 7d with zero resolved → auto-shadow)"
+      - "Signal-to-PnL ratio gate after 200 calls (must be >1.0)"
+    delivery_modes:
+      - "SHADOW (gate at emission; signals logged to side-channel but never fired)"
+      - "MANUAL (current default; Telegram with tap-to-approve)"
+      - "AUTO_VETO (60s countdown + Skip + Pause-All buttons; default off, env-flippable)"
+      - "AUTO_INSTANT (execute first, notify after; future, gated on proof)"
+
 notes: |
   Status "beta" because ATLAS is in go-live runway (gate G1-G6 tracker).
   Bumps to "live" after Yomi flips it to live trading post-tracker green.
