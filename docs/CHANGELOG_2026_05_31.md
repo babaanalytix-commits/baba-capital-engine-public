@@ -1,5 +1,12 @@
 # CHANGELOG — 2026-05-30 / 2026-05-31
 
+> **PM addendum (2026-05-31 afternoon)** — cross-surface reporting consistency
+> ship. D1-D4 below. Regression tests now 15/15. Close-drift reconciler
+> activated LIVE — immediately auto-corrected one phantom position
+> (SpaceX-IPO `id=9`, realized -$4.94, closed on Polymarket but still open
+> in registry). Skip to **Cross-Surface Reporting Ship** at the bottom for
+> the afternoon delta.
+
 Two-day batch covering tasks #196-#211. Theme: **discipline framework** —
 locking shipped fixes behind regression tests, a one-command pre-ship
 gate, and a 210-entry silent-failure catalog. Plus 12 RCAs and fixes
@@ -322,3 +329,103 @@ Continuous activity over the past two weeks:
 - **2026-05-30/31** — Discipline framework + 12 fixes; pre-ship gate is now mechanical (v0.8.0)
 
 Cadence target ≥3 substantive commits/week continues to be exceeded.
+
+---
+
+## Cross-Surface Reporting Ship (PM addendum, 2026-05-31)
+
+### Problem
+
+Reporting drifted across surfaces because **registry-state was treated as
+truth** but had no continuous reconciliation against venue-state. The
+result, observed live:
+
+- Public PWA showed `SpaceX-IPO +$94` for a position closed on Polymarket
+  hours earlier
+- LP tab listed positions whose value AND fees had both decayed to dust
+- Capital tab summed perp + LP equity but omitted Polymarket entirely
+- Deposit-detector expected a fixed wallet-env schema that didn't match
+  the operator's actual env
+
+The discipline framework caught the *code regressions* but not the
+*data-drift regressions*. Four new deliverables landed to close that gap,
+each with a regression test added to `engine/audit/regression_tests.py`.
+
+### D1 — Continuous close-drift reconciler
+
+`engine/audit/oracle_close_drift_worker.py`. Every 15 min, walks every
+`status='open'` ORACLE position, queries Polymarket venue truth, and
+marks any position absent from venue as `closed` with realized P&L
+backfilled from the venue close history. Audit ledger at
+`engine/_signals/oracle_close_drift_audit.jsonl`. DRY-RUN by default,
+LIVE behind `CLOSE_DRIFT_WORKER_LIVE=1` env + `--live` CLI arg.
+
+First live tick activated 2026-05-31 12:38 UTC. Caught `id=9
+WILL-SPACEX-IPO-BY-JUNE-30-2026` (NO-side short, $4.95 size, token-id not
+in venue positions). Marked closed, realized -$4.94.
+
+Test `n` in `regression_tests.py`: synthetic registry with one
+closed-on-venue and one still-open position, mock venue, assert exactly
+the closed-on-venue row drifts.
+
+### D2 — LP UI hides inactive (dust) positions
+
+LP positions whose NFT still exists but whose deposited liquidity has
+been fully removed (or decayed to <$1 value AND <$0.01 unclaimed fees)
+were still showing on the LP tab as "live" pools. Fixed in three layers:
+
+- `engine/api/canonical.py` `lp_positions_live(include_dust=False)` adds
+  `is_dust` boolean per position + a top-level `dust_filtered_count`
+- `engine/api/server.py` exposes `/api/lp/positions?include_dust=`
+- `engine/api/baba_app_v2.html` LP cards filter `is_dust` client-side and
+  show a "N inactive hidden" pill so the count is visible but the noise
+  isn't
+
+Test `o`: synthetic LP set with one active and one dust position; assert
+the dust position is filtered when `include_dust=False`.
+
+### D3 — Capital tab now aggregates Polymarket equity
+
+The Capital tab was summing Hyperliquid + LP equity but ignoring
+Polymarket cash + position value. New endpoint at
+`/api/capital/breakdown` returns per-venue equity with cash/positions
+split, sourced from canonical layer (Polymarket via
+`data-api.polymarket.com/positions` + `/user` cash balance).
+
+`baba_app_v2.html` Capital tab rebuilt to consume the breakdown
+directly. Source-of-truth is now a single endpoint; surfaces just render.
+
+Test `p`: mock per-venue feeds, assert total equity = sum of venue
+equities and that Polymarket cash is included in the "free" bucket.
+
+### D4 — Deposit detector wallet-env compatibility
+
+The detector hard-coded env var names `HL_MAIN_ADDRESS`,
+`POLYMARKET_PROXY_ADDRESS`, `HL_WALLET_ADDRESS` and silently no-op'd
+when an operator's env used alternates (`MAIN_TRADING_WALLET`,
+`POLYMARKET_SAFE_ADDRESS`, etc.). Replaced with a per-venue fallback
+chain: detector tries every known alias and logs which env name resolved
+for each wallet at startup. Missing wallets WARN + skip the venue
+gracefully rather than crashing.
+
+Test `m`: mock env with the alternative names; assert detector finds and
+scans the wallet.
+
+### Activation state
+
+- `engine/audit/oracle_close_drift_worker.py` LIVE behind env flag
+- `engine/launchd/com.baba.oracle-close-drift.plist` runs every 15 min,
+  `RunAtLoad=true`, `--live` flag set
+- 15 regression tests, all PASS in 0.6s
+- `python -m engine.audit.health` GREEN
+
+### Lesson written to memory
+
+`feedback_prediction_market_lifecycle_2026_05_31.md` —
+prediction-market positions are NOT perps. Hold-to-resolution is the
+default. Aggressive SL/drawdown gates designed for perp risk are
+catastrophic for buy-outcome-shares markets where 30% intra-day swings
+are normal. DRAWDOWN gate is now `0.80` (catastrophic-only), strategy-id
+filter is mandatory in lifecycle workers, and mark-fetch must respect
+side (`NO = 1 - YES_mid`).
+
