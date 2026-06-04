@@ -1,0 +1,345 @@
+# engine/scheduler/jobs.yaml
+#
+# Phase 2 job scheduler config — single source of "when to scan".
+#
+# Read by `python -m engine.scheduler` at startup. Re-read on every
+# scheduler restart (bouncing com.baba.scheduler.plist is the way to
+# apply changes). The 41 launchd plists are still live and authoritative
+# until the corresponding job here flips `shadow_mode: false` AND Yomi
+# manually disables (`launchctl bootout`) the legacy plist.
+#
+# FIELD REFERENCE
+#   name                   — unique key (used as job_id in DB)
+#   cmd                    — shell command (passed to subprocess shell=True)
+#   schedule_interval_sec  — fire every N seconds (omit/null for one-shot)
+#   max_runtime_sec        — SIGTERM after this; SIGKILL 5s later
+#   max_concurrency        — concurrent runs allowed (default 1)
+#   shadow_mode            — true = log "would have run", don't fork
+#                            false = LIVE (real subprocess.Popen)
+#   depends_on             — list of job names; if any RUNNING, we skip
+#   note                   — human note
+#
+# PHASE 2a → 2d MIGRATION
+#   2a  — all jobs shipped with shadow_mode: true (this file)
+#   2b  — pipeline_health_watcher flipped to false; corresponding plist
+#         booted out. First live job.
+#   2c  — flip oracle_close_drift / oracle_lifecycle once 2b proves stable.
+#   2d  — flip oracle_scan / md_ai_scan / md_ai_auto_executor.
+# Each flip = a Yomi-controlled diff to this file + a launchd bootout.
+
+jobs:
+
+  # ── ORACLE pillar ────────────────────────────────────────────────────
+
+  - name: oracle_scan
+    cmd: engine/run.sh oracle-scan
+    schedule_interval_sec: 5400    # 90 min (matches existing plist 2026-05-26)
+    max_runtime_sec: 1800          # 30 min hard cap
+    max_concurrency: 1             # strategy code also holds its own lockfile
+    shadow_mode: true
+    depends_on: []
+    note: "ORACLE AI multi-source scanner + judge + Telegram. Replaces com.baba.engine-oracle-scanner."
+
+  - name: oracle_lifecycle
+    cmd: engine/run.sh oracle-lifecycle
+    schedule_interval_sec: 300     # 5 min — only exit-enforcement on Polymarket
+    max_runtime_sec: 180
+    max_concurrency: 1
+    shadow_mode: true
+    depends_on: []
+    note: "Poll-based exit enforcement for ORACLE positions. Replaces com.baba.engine-oracle-lifecycle."
+
+  - name: oracle_close_drift
+    cmd: engine/run.sh oracle-close-drift --live
+    schedule_interval_sec: 900     # 15 min — matches reconciler cadence
+    max_runtime_sec: 180
+    max_concurrency: 1
+    shadow_mode: true
+    depends_on: [oracle_lifecycle] # don't fight lifecycle for the same registry rows
+    note: "Continuous close-drift reconciler (task #213). Replaces com.baba.oracle-close-drift."
+
+  # ── MD AI pillar ─────────────────────────────────────────────────────
+
+  - name: md_ai_scan
+    cmd: engine/run.sh md-scan
+    schedule_interval_sec: 1800    # 30 min — matches existing engine-md-scanner plist
+    max_runtime_sec: 900
+    max_concurrency: 1
+    shadow_mode: true
+    depends_on: []
+    note: "MD AI directional signal scanner. Replaces com.baba.engine-md-scanner."
+
+  - name: md_ai_auto_executor
+    # 10-sec polling — Phase 3 (queue primitives) will replace this with a
+    # long-running daemon. For Phase 2 we keep the existing ticker shape.
+    cmd: bash -c "cd /Users/yomioguntona/baba/wealth-ecosystem && exec domains/multi_dex_trading_agent/.venv/bin/python3 -m engine.strategies.md_ai.auto_executor"
+    schedule_interval_sec: 10
+    max_runtime_sec: 60
+    max_concurrency: 1
+    shadow_mode: true
+    depends_on: []
+    note: "MD AI auto-exec ticker. Stays in SHADOW through Phase 2 — Phase 3 swaps it for a long-running queue worker."
+
+  # ── Phase 3 queue workers (SHADOW) ───────────────────────────────────
+  # Phase 3 ARCHITECTURE — drain the SQL queue alongside the legacy
+  # auto_executor. SHADOW by default: claims rows, marks them done with
+  # error="shadow_no_op", does NOT touch the venue. The jsonl + legacy
+  # auto_executor remain authoritative through Phase 3. Cutover happens
+  # in Phase 4 once parity_queue_check is clean for 48h.
+
+  - name: oracle_queue_worker
+    cmd: bash -c "cd /Users/yomioguntona/baba/wealth-ecosystem && exec domains/multi_dex_trading_agent/.venv/bin/python3 -m engine.workers.auto_executor --pillar oracle"
+    schedule_interval_sec: 10
+    max_runtime_sec: 0             # long-running daemon — scheduler should
+                                   # never kill it; restart-on-exit handled
+                                   # by scheduler core
+    max_concurrency: 1
+    shadow_mode: true              # SCHEDULER-level shadow: don't fork the
+                                   # worker yet. Independent of QUEUE_WORKER_SHADOW.
+    depends_on: []
+    note: "Phase 3 SQL queue drainer for ORACLE. Replaces the 10s polling auto_executor in Phase 4."
+
+  - name: md_ai_queue_worker
+    cmd: bash -c "cd /Users/yomioguntona/baba/wealth-ecosystem && exec domains/multi_dex_trading_agent/.venv/bin/python3 -m engine.workers.auto_executor --pillar md_ai"
+    schedule_interval_sec: 10
+    max_runtime_sec: 0
+    max_concurrency: 1
+    shadow_mode: true
+    depends_on: []
+    note: "Phase 3 SQL queue drainer for MD AI. Replaces the 10s polling auto_executor in Phase 4."
+
+  # ── observability ────────────────────────────────────────────────────
+
+  # ── Phase 4 DLQ Telegram alerter ─────────────────────────────────────
+  - name: dlq_alerter
+    cmd: bash -c "cd /Users/yomioguntona/baba/wealth-ecosystem && unset PYTHONHOME PYTHONPATH PYTHONSTARTUP PYTHONUSERBASE && export PYTHONNOUSERSITE=1 && for f in engine/.env .env.lp ops/bmi/.env; do [ -f \"$f\" ] && set -a && . \"$f\" && set +a; done && exec domains/multi_dex_trading_agent/.venv/bin/python3 -m ops.risk.dlq_alerter --quiet"
+    schedule_interval_sec: 60
+    max_runtime_sec: 90
+    max_concurrency: 1
+    shadow_mode: false              # LIVE — alerting is read-only on capital
+    depends_on: []
+    note: "Phase 4 DLQ Telegram alerter — polls dead_letters every 60s, dedups by last_alerted_dlq_id."
+
+  # ── #333 trustless alignment audit + drift alerter ───────────────────
+  - name: trustless_alignment_audit
+    cmd: bash -c "cd /Users/yomioguntona/baba/wealth-ecosystem && unset PYTHONHOME PYTHONPATH PYTHONSTARTUP PYTHONUSERBASE && export PYTHONNOUSERSITE=1 && for f in engine/.env .env.lp ops/bmi/.env; do [ -f \"$f\" ] && set -a && . \"$f\" && set +a; done && exec domains/multi_dex_trading_agent/.venv/bin/python3 -m engine.audit.trustless_alignment --quiet"
+    schedule_interval_sec: 300
+    max_runtime_sec: 120
+    max_concurrency: 1
+    shadow_mode: false              # LIVE — read-only audit, no capital impact
+    depends_on: []
+    note: "#333 D2 — every 5min: walks data_alignment_registry.yaml, fetches each metric from each surface, writes engine/_reports/alignment_audit.json."
+
+  - name: drift_alerter
+    cmd: bash -c "cd /Users/yomioguntona/baba/wealth-ecosystem && unset PYTHONHOME PYTHONPATH PYTHONSTARTUP PYTHONUSERBASE && export PYTHONNOUSERSITE=1 && for f in engine/.env .env.lp ops/bmi/.env; do [ -f \"$f\" ] && set -a && . \"$f\" && set +a; done && exec domains/multi_dex_trading_agent/.venv/bin/python3 -m ops.risk.drift_alerter --quiet"
+    schedule_interval_sec: 600
+    max_runtime_sec: 60
+    max_concurrency: 1
+    shadow_mode: false              # LIVE — operator alerts
+    depends_on: [trustless_alignment_audit]
+    note: "#333 D4 — every 10min: reads alignment_audit.json, sends [BROKEN] tagged drift alerts to operator TG with 1h dedup."
+
+  # ── #349 MD venue↔registry reconciler ────────────────────────────────
+  - name: md_venue_reconciler
+    cmd: bash -c "cd /Users/yomioguntona/baba/wealth-ecosystem && unset PYTHONHOME PYTHONPATH PYTHONSTARTUP PYTHONUSERBASE && export PYTHONNOUSERSITE=1 && for f in engine/.env .env.lp ops/bmi/.env; do [ -f \"$f\" ] && set -a && . \"$f\" && set +a; done && exec domains/multi_dex_trading_agent/.venv/bin/python3 -m engine.audit.md_venue_reconciler --quiet"
+    schedule_interval_sec: 600
+    max_runtime_sec: 60
+    max_concurrency: 1
+    shadow_mode: false              # LIVE — read-only audit, no capital impact
+    depends_on: []
+    note: "#349 — every 10min: compares HL+Pacifica+GRVT venue truth vs md.db. Sends [BROKEN] tagged operator TG alert when VENUE_ONLY or REGISTRY_ONLY drift detected. Silent-when-healthy."
+
+  # ── Phase 5 paper workers (SHADOW until Yomi flips PAPER_MIRROR_*) ──
+  # Paper writes are physically routed to mock venues; nothing here can
+  # touch a real venue. SHADOW mode at the scheduler level means we won't
+  # even fork these processes until Yomi opts in. The per-pillar mirror
+  # flag (PAPER_MIRROR_ORACLE / PAPER_MIRROR_MD_AI) controls whether
+  # there are any paper rows for the workers to claim.
+
+  - name: paper_oracle_worker
+    cmd: bash -c "cd /Users/yomioguntona/baba/wealth-ecosystem && exec domains/multi_dex_trading_agent/.venv/bin/python3 -m engine.workers.paper_executor --pillar oracle"
+    schedule_interval_sec: 10
+    max_runtime_sec: 0
+    max_concurrency: 1
+    shadow_mode: false
+    depends_on: []
+    note: "Phase 5 paper SQL queue drainer for ORACLE — mock Polymarket. SHADOW until Yomi sets PAPER_MIRROR_ORACLE=1."
+
+  - name: paper_md_ai_worker
+    cmd: bash -c "cd /Users/yomioguntona/baba/wealth-ecosystem && exec domains/multi_dex_trading_agent/.venv/bin/python3 -m engine.workers.paper_executor --pillar md_ai"
+    schedule_interval_sec: 10
+    max_runtime_sec: 0
+    max_concurrency: 1
+    shadow_mode: true
+    depends_on: []
+    note: "Phase 5 paper SQL queue drainer for MD AI — mock HL/GRVT/Pacifica. SHADOW until Yomi sets PAPER_MIRROR_MD_AI=1."
+
+  - name: paper_valuation
+    cmd: bash -c "cd /Users/yomioguntona/baba/wealth-ecosystem && exec domains/multi_dex_trading_agent/.venv/bin/python3 -m engine.paper.valuation --pillar all"
+    schedule_interval_sec: 300            # 5 min mark-to-market sweep
+    max_runtime_sec: 180
+    max_concurrency: 1
+    shadow_mode: true
+    depends_on: []
+    note: "Phase 5 paper mark-to-market refresh — pulls real venue marks, updates paper_positions.mark_to_market_pnl_usd."
+
+  - name: paper_divergence_check
+    cmd: bash -c "cd /Users/yomioguntona/baba/wealth-ecosystem && exec domains/multi_dex_trading_agent/.venv/bin/python3 -m engine.paper.valuation --pillar all --skip-mtm"
+    schedule_interval_sec: 3600           # 1h paper-vs-prod divergence check
+    max_runtime_sec: 180
+    max_concurrency: 1
+    shadow_mode: true
+    depends_on: []
+    note: "Phase 5 paper-vs-prod divergence check. Writes to paper_divergence; pipeline_health paper stage surfaces it."
+
+  - name: experiment_scorer
+    cmd: bash -c "cd /Users/yomioguntona/baba/wealth-ecosystem && exec domains/multi_dex_trading_agent/.venv/bin/python3 -m engine.paper.experiment_scorer"
+    schedule_interval_sec: 3600          # 1h — Phase 5A
+    max_runtime_sec: 300
+    max_concurrency: 1
+    # Phase 5A scorer is READ-ONLY against paper tables — safe to flip live
+    # immediately. It only WRITES to experiment_scores + best-effort Telegram
+    # alert on PROMOTE.
+    shadow_mode: false
+    depends_on: []
+    note: "Phase 5A experiment scorer (task #289). Reads experiment_paper_runs, writes experiment_scores, Telegram alerts on PROMOTE."
+
+  - name: pipeline_health_watcher
+    # Wrapper unsets PYTHONHOME/PATH + sources env files for telegram creds
+    # so the watcher Telegram-alerts stick-RED stages.
+    cmd: bash -c "cd /Users/yomioguntona/baba/wealth-ecosystem && unset PYTHONHOME PYTHONPATH PYTHONSTARTUP PYTHONUSERBASE && export PYTHONNOUSERSITE=1 && for f in engine/.env .env.lp ops/bmi/.env; do [ -f \"$f\" ] && set -a && . \"$f\" && set +a; done && exec domains/multi_dex_trading_agent/.venv/bin/python3 -m ops.risk.pipeline_health_watcher"
+    schedule_interval_sec: 1800    # 30 min — matches existing plist
+    max_runtime_sec: 300
+    max_concurrency: 1
+    shadow_mode: true
+    depends_on: []
+    note: "Pipeline-health observability. Smallest blast-radius — first candidate for shadow_mode: false in Phase 2b."
+
+  # ── LP Phase D (#371) — auto-rebalance approval pipeline ─────────────
+
+  - name: lp_rebalance_dispatcher
+    # Polls snapshot.rebalance_plans every 60s. For each plan with a
+    # matching valid approval in lp_approvals.jsonl, fires the right
+    # executor (prjx or aerodrome). Safe-by-default: the executor's own
+    # LP_AUTO_EXECUTE_PRJX / LP_AUTO_EXECUTE_AERO flags also apply, so
+    # even an approved plan won't fire unless the env flag is true.
+    # 2026-06-03 (#376): flipped LIVE alongside LP_AUTO_EXECUTE_AERO=true
+    # in engine/.env. Aero only; prjx still env-gated off.
+    cmd: bash -c "cd /Users/yomioguntona/baba/wealth-ecosystem && unset PYTHONHOME PYTHONPATH PYTHONSTARTUP PYTHONUSERBASE && export PYTHONNOUSERSITE=1 && for f in engine/.env .env.lp ops/bmi/.env; do [ -f \"$f\" ] && set -a && . \"$f\" && set +a; done && exec domains/multi_dex_trading_agent/.venv/bin/python3 -m engine.workers.lp_rebalance_dispatcher"
+    schedule_interval_sec: 60       # 1 min — fast follow-up after Yomi taps Approve
+    max_runtime_sec: 240            # 4 min hard cap (multi-tx Aero takes ~90s)
+    max_concurrency: 1              # single-process: in-memory + disk cooldown
+    shadow_mode: false              # LIVE 2026-06-03 — fires on approval+env-flag match
+    depends_on: []
+    note: "Phase D4 (#375). Reads approval_store, fires executor on match. Marks consumed after broadcast. Operator-only Telegram receipts. LIVE 2026-06-03."
+
+  - name: lp_idle_deploy_dispatcher
+    # 2026-06-04 (#412). Detects idle USDC + cbBTC in LP wallet on Base.
+    # If both tokens have meaningful balance AND no cooldown active AND
+    # LP_AUTO_EXECUTE_AERO_TOPUP=true → fires increaseLiquidity on the
+    # matching Aerodrome USDC/cbBTC position. Otherwise logs the proposal
+    # (audit trail) so Yomi can review what it WOULD do.
+    # DEFAULT: dry-run. Flip LP_AUTO_EXECUTE_AERO_TOPUP=true in engine/.env
+    # after reviewing 24h of dry-run cycles.
+    cmd: bash -c "cd /Users/yomioguntona/baba/wealth-ecosystem && unset PYTHONHOME PYTHONPATH PYTHONSTARTUP PYTHONUSERBASE && export PYTHONNOUSERSITE=1 && for f in engine/.env .env.lp ops/bmi/.env; do [ -f \"$f\" ] && set -a && . \"$f\" && set +a; done && exec domains/multi_dex_trading_agent/.venv/bin/python3 -m engine.strategies.lp_agile.idle_deploy_dispatcher"
+    schedule_interval_sec: 900       # 15 min
+    max_runtime_sec: 180
+    max_concurrency: 1
+    shadow_mode: false               # job is itself dry-run-gated by env flag
+    depends_on: []
+    note: "#412. Dry-run until LP_AUTO_EXECUTE_AERO_TOPUP=true. Then auto-deploys idle wallet capital."
+
+  - name: lp_idle_deploy_dispatcher_prjx
+    # 2026-06-04 (#414). HyperEVM counterpart to lp_idle_deploy_dispatcher.
+    # Detects idle USDC + WHYPE in LP wallet on HyperEVM. Uses OpenOcean
+    # for the USDC↔WHYPE balancing swap, then fires prjx increaseLiquidity
+    # on the matching WHYPE/USDC managed position. Same lessons baked in
+    # as #419 Aerodrome version (shortage-only swap, mins=1, retry-w-backoff,
+    # dynamic gas estimation).
+    # DEFAULT: dry-run. Flip LP_AUTO_EXECUTE_PRJX_TOPUP=true after review.
+    cmd: bash -c "cd /Users/yomioguntona/baba/wealth-ecosystem && unset PYTHONHOME PYTHONPATH PYTHONSTARTUP PYTHONUSERBASE && export PYTHONNOUSERSITE=1 && for f in engine/.env .env.lp ops/bmi/.env; do [ -f \"$f\" ] && set -a && . \"$f\" && set +a; done && exec domains/multi_dex_trading_agent/.venv/bin/python3 -m engine.strategies.lp_agile.idle_deploy_dispatcher_prjx"
+    schedule_interval_sec: 900       # 15 min
+    max_runtime_sec: 240              # OpenOcean swap + increaseLiquidity ~2 min worst case
+    max_concurrency: 1
+    shadow_mode: false               # job is itself dry-run-gated by env flag
+    depends_on: []
+    note: "#414. Dry-run until LP_AUTO_EXECUTE_PRJX_TOPUP=true. Mirror of Aerodrome dispatcher for HyperEVM."
+
+  - name: lp_dynamic_range_dispatcher
+    # 2026-06-04 (#420 part 2). Proactive LP range optimization. Pulls
+    # candles for each LP pair, computes trend/vol/drift, proposes
+    # asymmetric range shifts when expected fee uplift > cost (gas + IL).
+    # HyperEVM: AUTO-execute (cheap gas, fast cadence). Base: ALERT-ONLY
+    # initially (operator approves via Telegram).
+    cmd: bash -c "cd /Users/yomioguntona/baba/wealth-ecosystem && unset PYTHONHOME PYTHONPATH PYTHONSTARTUP PYTHONUSERBASE && export PYTHONNOUSERSITE=1 && for f in engine/.env .env.lp ops/bmi/.env; do [ -f \"$f\" ] && set -a && . \"$f\" && set +a; done && exec domains/multi_dex_trading_agent/.venv/bin/python3 -m engine.strategies.lp_agile.dynamic_range_dispatcher"
+    schedule_interval_sec: 1800     # 30 min
+    max_runtime_sec: 180
+    max_concurrency: 1
+    shadow_mode: false
+    depends_on: []
+    note: "#420 part 2. HyperEVM auto, Base alert-only. Per-pair price action + cost/benefit gate."
+
+  - name: lp_apr_scanner
+    # 2026-06-04 (#420). Scans DeFiLlama yields, publishes per-chain top-20
+    # APR leaderboard to ops/pwa/serve/lp_apr_leaderboard.json, fires
+    # cross-chain bridge alerts when delta > LP_BRIDGE_ALERT_DELTA_PCT
+    # (default 20pp) with 24h dedup. NO auto-execute cross-chain.
+    cmd: bash -c "cd /Users/yomioguntona/baba/wealth-ecosystem && unset PYTHONHOME PYTHONPATH PYTHONSTARTUP PYTHONUSERBASE && export PYTHONNOUSERSITE=1 && for f in engine/.env .env.lp ops/bmi/.env; do [ -f \"$f\" ] && set -a && . \"$f\" && set +a; done && exec domains/multi_dex_trading_agent/.venv/bin/python3 -m engine.strategies.lp_agile.lp_apr_scanner"
+    schedule_interval_sec: 21600    # 6 hours
+    max_runtime_sec: 120
+    max_concurrency: 1
+    shadow_mode: false
+    depends_on: []
+    note: "#420 part C+E. Periodic APR discovery + cross-chain bridge alert."
+
+  - name: lp_rebalance_alerter
+    # 2026-06-04 (#420). Reads capital_optimizer proposals, fires Telegram
+    # digest with intra-chain rebalance recommendations. ALERT-ONLY (no
+    # auto-execute). Daily cadence, 24h dedup per recommendation.
+    cmd: bash -c "cd /Users/yomioguntona/baba/wealth-ecosystem && unset PYTHONHOME PYTHONPATH PYTHONSTARTUP PYTHONUSERBASE && export PYTHONNOUSERSITE=1 && for f in engine/.env .env.lp ops/bmi/.env; do [ -f \"$f\" ] && set -a && . \"$f\" && set +a; done && exec domains/multi_dex_trading_agent/.venv/bin/python3 -m engine.strategies.lp_agile.lp_rebalance_alerter"
+    schedule_interval_sec: 86400   # 24 hours
+    max_runtime_sec: 60
+    max_concurrency: 1
+    shadow_mode: false
+    depends_on: []
+    note: "#420 part D. Intra-chain rebalance recommendations via Telegram."
+
+  - name: portfolio_allocation_v2
+    # 2026-06-04 (#416). 3-pillar portfolio monitor (LP/MD/ORACLE at 60/25/15)
+    # with 10% drift band. Writes engine/_reports/treasury_latest.json which
+    # PWA Capital tab consumes. Sends Telegram alert when any pillar drifts
+    # beyond band. LP under-allocation gets auto-fired via the existing
+    # idle-deploy dispatcher (#412); cross-venue moves are alert-only.
+    # 6h cadence — allocations don't drift fast.
+    cmd: bash -c "cd /Users/yomioguntona/baba/wealth-ecosystem && unset PYTHONHOME PYTHONPATH PYTHONSTARTUP PYTHONUSERBASE && export PYTHONNOUSERSITE=1 && for f in engine/.env .env.lp ops/bmi/.env; do [ -f \"$f\" ] && set -a && . \"$f\" && set +a; done && exec domains/multi_dex_trading_agent/.venv/bin/python3 -m engine.allocator.treasury --once"
+    schedule_interval_sec: 21600       # 6 hours
+    max_runtime_sec: 120
+    max_concurrency: 1
+    shadow_mode: false
+    depends_on: []
+    note: "#416. 3-pillar portfolio snapshot + drift alerts."
+
+  - name: lp_managed_positions_reconciler
+    # 2026-06-04 (#171 Half B + #411). Recurring reconciler that keeps the
+    # managed_positions registry in sync with chain truth from
+    # ops/pwa/serve/lp_agile_latest.json. Updates lifetime_capital_in_usd,
+    # lifetime_fees_collected_usd, current_nft_token_id. Recomputes realized
+    # APR after each update. Silent when healthy; operator Telegram alert
+    # on MAJOR drift (>10% or >$25). Without this the LP capital optimizer
+    # can't make proposals — fees stay at 0 and APR is NULL.
+    cmd: bash -c "cd /Users/yomioguntona/baba/wealth-ecosystem && unset PYTHONHOME PYTHONPATH PYTHONSTARTUP PYTHONUSERBASE && export PYTHONNOUSERSITE=1 && for f in engine/.env .env.lp ops/bmi/.env; do [ -f \"$f\" ] && set -a && . \"$f\" && set +a; done && exec domains/multi_dex_trading_agent/.venv/bin/python3 -m engine.audit.lp_managed_positions_reconciler"
+    schedule_interval_sec: 900       # 15 min — chain reads are cheap; keeps registry fresh
+    max_runtime_sec: 90
+    max_concurrency: 1
+    shadow_mode: false               # LIVE 2026-06-04 — read-mostly + idempotent
+    depends_on: []
+    note: "#171 Half B + #411 standing rule. Mirrors ORACLE close-drift reconciler pattern."
+
+  - name: lp_approval_gc
+    cmd: bash -c "cd /Users/yomioguntona/baba/wealth-ecosystem && unset PYTHONHOME PYTHONPATH PYTHONSTARTUP PYTHONUSERBASE && export PYTHONNOUSERSITE=1 && exec domains/multi_dex_trading_agent/.venv/bin/python3 -c 'from engine.strategies.lp_agile import approval_store; n=approval_store.gc_expired(); print(f\"[lp_approval_gc] removed={n}\")'"
+    schedule_interval_sec: 900      # 15 min
+    max_runtime_sec: 60
+    max_concurrency: 1
+    shadow_mode: false              # GC is read-mostly + safe; no LIVE side effect
+    depends_on: []
+    note: "Phase D4 — garbage-collect expired+old-consumed approvals from lp_approvals.jsonl."
